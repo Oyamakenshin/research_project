@@ -179,15 +179,13 @@ class DataMarket(Model):
                 "ProviderRevenue": "provider_revenue"      # プロバイダ収益
             },
             agent_reporters={
-                "w_1": "w_1",
-                "w_n": "w_n",
-                "alpha": "alpha",
-                "lamb": "lamb",
-                "l_n_minus_1": "l_n_minus_1",
-                "HasToken": "has_token",
-                "Wealth": "wealth",
-                "Persona": "persona",
-                "BoughtStep": "bought_step"
+                "w_1": lambda a: a.w_1,
+                "w_n": lambda a: a.w_n,
+                "l_n_minus_1": lambda a: a.l_n_minus_1,
+                "HasToken": lambda a: a.has_token,
+                "Wealth": lambda a: a.wealth,
+                "Persona": lambda a: a.persona,
+                "BoughtStep": lambda a: a.bought_step
             }
         )
         
