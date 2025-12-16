@@ -272,8 +272,6 @@ class DataMarket(Model):
         # フラグが立っているエージェントが購入を試みる
         non_holder_agents.shuffle_do("buy_if_flagged")
 
-        # 価格更新
-        self.update_price()
 
         k_after = self.sold_tokens # 更新後の販売数
         
@@ -284,6 +282,8 @@ class DataMarket(Model):
         non_holder_agents = self.participants.select(lambda agent: not agent.has_token)
         non_holder_agents.shuffle_do("calculate_current_utility", k_before=k_before, k_after=k_after)
         
+        # 価格更新
+        self.update_price()
 
         # 結果をデータ収集
         self.datacollector.collect(self)
