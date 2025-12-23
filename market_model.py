@@ -105,7 +105,7 @@ class Participants(Agent):
     # 買いたいと思うかどうかを確率的に判定
     # -------------------------------------------------------
     def flag_if_interested(self, k):
-        price = self.model.initial_price
+        price = self.model.current_price
         bid_price = self.calculate_bid(k, self.model.num_agents)
 
         # トークンが売り切れ or すでに持っている場合はスキップ
@@ -130,11 +130,11 @@ class Participants(Agent):
     def buy_if_flagged(self):
         if self.bid_flag and not self.has_token and self.model.sold_tokens < self.model.num_data:
             # 支払い処理
-            self.wealth -= self.model.initial_price
+            self.wealth -= self.model.current_price
             self.has_token = True
             # モデル全体の販売数・収益を更新
             self.model.sold_tokens += 1
-            self.model.provider_revenue += self.model.initial_price
+            self.model.provider_revenue += self.model.current_price
             # 状態更新
             self.bid_flag = False
             self.bought_step = self.model.steps
@@ -153,7 +153,7 @@ class Participants(Agent):
         W1 = self.w_1
         r = alpha ** (1 / (n - 1))
         if self.has_token:
-            current_utility = W1 * (r ** (k_after - 1)) + lambda_ * (1 / (1 - alpha)) * (W1 - W1 * (r ** k_before)) - self.model.initial_price
+            current_utility = W1 * (r ** (k_after - 1)) + lambda_ * (1 / (1 - alpha)) * (W1 - W1 * (r ** k_before)) - self.model.current_price
         else:
             current_utility = -lambda_ * (1 / (1 - alpha)) * (W1 - W1 * (r ** k_after))
             
@@ -174,7 +174,7 @@ class DataMarket(Model):
 
     def __init__(self, num_agents, num_data, initial_price, 
                  persona_dist, wealth_alpha, wealth_scale, w1_params, 
-                 tau=0.5, seed=None):
+                 tau=0.5, seed=None, dynamic_pricing=False, gamma=0.0):
         super().__init__(seed=seed)
 
         # モデル全体の基本設定
@@ -183,6 +183,9 @@ class DataMarket(Model):
         self.initial_price = initial_price
         self.persona_dist = persona_dist  # {"intrinsic":0.5, "follower":0.5} のような比率
         self.tau = tau                    # ロジスティック関数の鋭さ
+        self.dynamic_pricing = dynamic_pricing
+        self.gamma = gamma
+        self.current_price = initial_price # 現在の価格（動的に変動）
 
         # 分布パラメータ
         self.wealth_alpha, self.wealth_scale = wealth_alpha, wealth_scale
@@ -199,7 +202,8 @@ class DataMarket(Model):
         self.datacollector = DataCollector(
             model_reporters={
                 "Holders": lambda m: m.sold_tokens,        # 保有者数（販売済みトークン）
-                "ProviderRevenue": "provider_revenue"      # プロバイダ収益
+                "ProviderRevenue": "provider_revenue",      # プロバイダ収益
+                "CurrentPrice": "current_price"             # 現在価格
             },
             agent_reporters={
                 "w_1": "w_1",
@@ -245,6 +249,14 @@ class DataMarket(Model):
         # 初期データ収集
         self.datacollector.collect(self)
 
+    def update_price(self):
+        """
+        動的価格設定が有効な場合、販売数に応じて価格を更新する。
+        P(k) = P_base * (1 + gamma * k / N)
+        """
+        if self.dynamic_pricing:
+            self.current_price = self.initial_price * (1 + self.gamma * (self.sold_tokens / self.num_agents))
+
     # -------------------------------------------------------
     # 1ステップ分のシミュレーション
     # -------------------------------------------------------
@@ -259,7 +271,8 @@ class DataMarket(Model):
 
         # フラグが立っているエージェントが購入を試みる
         non_holder_agents.shuffle_do("buy_if_flagged")
-        
+
+
         k_after = self.sold_tokens # 更新後の販売数
         
         bought_agents = self.participants.select(lambda agent: agent.bought_this_step)
@@ -269,6 +282,8 @@ class DataMarket(Model):
         non_holder_agents = self.participants.select(lambda agent: not agent.has_token)
         non_holder_agents.shuffle_do("calculate_current_utility", k_before=k_before, k_after=k_after)
         
+        # 価格更新
+        self.update_price()
 
         # 結果をデータ収集
         self.datacollector.collect(self)
