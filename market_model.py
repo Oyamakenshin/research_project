@@ -258,32 +258,52 @@ class DataMarket(Model):
             self.current_price = self.initial_price * (1 + self.gamma * (self.sold_tokens / self.num_agents))
 
     # -------------------------------------------------------
-    # 1ステップ分のシミュレーション
+    # 1ステップ分のシミュレーション（逐次意思決定モデル）
     # -------------------------------------------------------
     def step(self):
-        k_before = self.sold_tokens  # 現在の販売数
-
-        # まだ購入していないエージェントだけを対象に行動
+        k_before = self.sold_tokens  # Step開始時の販売数
+        
+        # まだ購入していないエージェントを取得
         non_holder_agents = self.participants.select(lambda agent: not agent.has_token)
         
-        # 興味を持つかどうかを判定（確率的）
-        non_holder_agents.shuffle_do("flag_if_interested", k=k_before)
-
-        # フラグが立っているエージェントが購入を試みる
-        non_holder_agents.shuffle_do("buy_if_flagged")
-
-
-        k_after = self.sold_tokens # 更新後の販売数
+        # ランダムな順序で意思決定させる（逐次処理）
+        # shuffle_doはリスト全体に対する並行処理的な意味合いが強いため、
+        # ここでは明示的にリストを取得してシャッフルし、forループで回す
+        agent_list = list(non_holder_agents)
+        self.random.shuffle(agent_list)
         
-        bought_agents = self.participants.select(lambda agent: agent.bought_this_step)
+        for agent in agent_list:
+            # 1. 現在の販売数(k)に基づいて興味判定
+            # 注意: ここでの k は「この瞬間の」sold_tokens を使うべき
+            current_k = self.sold_tokens
+            
+            interested = agent.flag_if_interested(k=current_k)
+            
+            if interested:
+                # 2. 購入試行
+                bought = agent.buy_if_flagged()
+                
+                # 3. 購入が発生したら即座に価格更新 (Sequential Update)
+                if bought:
+                    current_k += 1
+                    self.update_price()
+                    agent.calculate_current_utility(k_before=k_before, k_after=current_k)
         
-        bought_agents.shuffle_do("calculate_current_utility", k_before=k_before, k_after=k_after)
+        # --- 統計情報の更新（効用計算など） ---
+        # 逐次処理が終わった後の状態(k_after)で、対象エージェントの効用を再計算・記録する
+        # 対象: 「このステップで購入した人」 または 「まだ持っていない人」
+        # （既に持っている人は、購入時点の効用で固定するという仮定のため更新しない）
         
-        non_holder_agents = self.participants.select(lambda agent: not agent.has_token)
-        non_holder_agents.shuffle_do("calculate_current_utility", k_before=k_before, k_after=k_after)
+        k_after = self.sold_tokens
         
-        # 価格更新
-        self.update_price()
-
+        # 対象エージェントを抽出
+        # Note: bought_this_step is True ONLY for agents who bought in this specific step
+        target_agents = self.participants.select(
+            lambda agent: not agent.has_token
+        )
+        
+        # 対象者のみ効用計算を実行
+        target_agents.shuffle_do("calculate_current_utility", k_before=k_before, k_after=k_after)
+        
         # 結果をデータ収集
         self.datacollector.collect(self)
