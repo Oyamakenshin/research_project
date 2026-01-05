@@ -105,7 +105,7 @@ class Participants(Agent):
     # 買いたいと思うかどうかを確率的に判定
     # -------------------------------------------------------
     def flag_if_interested(self, k):
-        price = self.model.initial_price
+        price = self.model.current_price
         bid_price = self.calculate_bid(k, self.model.num_agents)
 
         # トークンが売り切れ or すでに持っている場合はスキップ
@@ -130,11 +130,11 @@ class Participants(Agent):
     def buy_if_flagged(self):
         if self.bid_flag and not self.has_token and self.model.sold_tokens < self.model.num_data:
             # 支払い処理
-            self.wealth -= self.model.initial_price
+            self.wealth -= self.model.current_price
             self.has_token = True
             # モデル全体の販売数・収益を更新
             self.model.sold_tokens += 1
-            self.model.provider_revenue += self.model.initial_price
+            self.model.provider_revenue += self.model.current_price
             # 状態更新
             self.bid_flag = False
             self.bought_step = self.model.steps
@@ -153,7 +153,7 @@ class Participants(Agent):
         W1 = self.w_1
         r = alpha ** (1 / (n - 1))
         if self.has_token:
-            current_utility = W1 * (r ** (k_after - 1)) + lambda_ * (1 / (1 - alpha)) * (W1 - W1 * (r ** k_before)) - self.model.initial_price
+            current_utility = W1 * (r ** (k_after - 1)) + lambda_ * (1 / (1 - alpha)) * (W1 - W1 * (r ** k_before)) - self.model.current_price
         else:
             current_utility = -lambda_ * (1 / (1 - alpha)) * (W1 - W1 * (r ** k_after))
             
@@ -174,7 +174,7 @@ class DataMarket(Model):
 
     def __init__(self, num_agents, num_data, initial_price, 
                  persona_dist, wealth_alpha, wealth_scale, w1_params, 
-                 tau=0.5, seed=None):
+                 tau=0.5, seed=None, dynamic_pricing=False, gamma=0.0, pricing_strategy="linear"):
         super().__init__(seed=seed)
 
         # モデル全体の基本設定
@@ -183,6 +183,10 @@ class DataMarket(Model):
         self.initial_price = initial_price
         self.persona_dist = persona_dist  # {"intrinsic":0.5, "follower":0.5} のような比率
         self.tau = tau                    # ロジスティック関数の鋭さ
+        self.dynamic_pricing = dynamic_pricing
+        self.pricing_strategy = pricing_strategy
+        self.gamma = gamma
+        self.current_price = initial_price # 現在の価格（動的に変動）
 
         # 分布パラメータ
         self.wealth_alpha, self.wealth_scale = wealth_alpha, wealth_scale
@@ -199,7 +203,8 @@ class DataMarket(Model):
         self.datacollector = DataCollector(
             model_reporters={
                 "Holders": lambda m: m.sold_tokens,        # 保有者数（販売済みトークン）
-                "ProviderRevenue": "provider_revenue"      # プロバイダ収益
+                "ProviderRevenue": "provider_revenue",      # プロバイダ収益
+                "CurrentPrice": "current_price"             # 現在価格
             },
             agent_reporters={
                 "w_1": "w_1",
@@ -245,30 +250,69 @@ class DataMarket(Model):
         # 初期データ収集
         self.datacollector.collect(self)
 
+    def update_price(self):
+        """
+        動的価格設定が有効な場合、販売数に応じて価格を更新する。
+        Linear: P(k) = P_base * (1 + gamma * k / N)
+        Exponential: P(k) = P_base * exp(gamma * k)
+        """
+        if self.dynamic_pricing:
+            if self.pricing_strategy == "exponential":
+                # 指数関数的価格設定（プライバシーリスク調整型）
+                # gammaは分布の感度パラメータに相当 (Risk Premium)
+                # ユーザーフィードバックにより、Nに依存しないよう所持率(k/N)ベースに変更
+                self.current_price = self.initial_price * np.exp(self.gamma * (self.sold_tokens / self.num_agents))
+            else:
+                # 従来の線形価格設定
+                self.current_price = self.initial_price * (1 + self.gamma * (self.sold_tokens / self.num_agents))
+
     # -------------------------------------------------------
-    # 1ステップ分のシミュレーション
+    # 1ステップ分のシミュレーション（逐次意思決定モデル）
     # -------------------------------------------------------
     def step(self):
-        k_before = self.sold_tokens  # 現在の販売数
-
-        # まだ購入していないエージェントだけを対象に行動
+        k_before = self.sold_tokens  # Step開始時の販売数
+        
+        # まだ購入していないエージェントを取得
         non_holder_agents = self.participants.select(lambda agent: not agent.has_token)
         
-        # 興味を持つかどうかを判定（確率的）
-        non_holder_agents.shuffle_do("flag_if_interested", k=k_before)
-
-        # フラグが立っているエージェントが購入を試みる
-        non_holder_agents.shuffle_do("buy_if_flagged")
+        # ランダムな順序で意思決定させる（逐次処理）
+        # shuffle_doはリスト全体に対する並行処理的な意味合いが強いため、
+        # ここでは明示的にリストを取得してシャッフルし、forループで回す
+        agent_list = list(non_holder_agents)
+        self.random.shuffle(agent_list)
         
-        k_after = self.sold_tokens # 更新後の販売数
+        for agent in agent_list:
+            # 1. 現在の販売数(k)に基づいて興味判定
+            # 注意: ここでの k は「この瞬間の」sold_tokens を使うべき
+            current_k = self.sold_tokens
+            
+            interested = agent.flag_if_interested(k=current_k)
+            
+            if interested:
+                # 2. 購入試行
+                bought = agent.buy_if_flagged()
+                
+                # 3. 購入が発生したら即座に価格更新 (Sequential Update)
+                if bought:
+                    current_k += 1
+                    self.update_price()
+                    agent.calculate_current_utility(k_before=k_before, k_after=current_k)
         
-        bought_agents = self.participants.select(lambda agent: agent.bought_this_step)
+        # --- 統計情報の更新（効用計算など） ---
+        # 逐次処理が終わった後の状態(k_after)で、対象エージェントの効用を再計算・記録する
+        # 対象: 「このステップで購入した人」 または 「まだ持っていない人」
+        # （既に持っている人は、購入時点の効用で固定するという仮定のため更新しない）
         
-        bought_agents.shuffle_do("calculate_current_utility", k_before=k_before, k_after=k_after)
+        k_after = self.sold_tokens
         
-        non_holder_agents = self.participants.select(lambda agent: not agent.has_token)
-        non_holder_agents.shuffle_do("calculate_current_utility", k_before=k_before, k_after=k_after)
+        # 対象エージェントを抽出
+        # Note: bought_this_step is True ONLY for agents who bought in this specific step
+        target_agents = self.participants.select(
+            lambda agent: not agent.has_token
+        )
         
-
+        # 対象者のみ効用計算を実行
+        target_agents.shuffle_do("calculate_current_utility", k_before=k_before, k_after=k_after)
+        
         # 結果をデータ収集
         self.datacollector.collect(self)
