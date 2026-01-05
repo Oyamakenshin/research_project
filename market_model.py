@@ -174,7 +174,7 @@ class DataMarket(Model):
 
     def __init__(self, num_agents, num_data, initial_price, 
                  persona_dist, wealth_alpha, wealth_scale, w1_params, 
-                 tau=0.5, seed=None, dynamic_pricing=False, gamma=0.0):
+                 tau=0.5, seed=None, dynamic_pricing=False, gamma=0.0, pricing_strategy="linear"):
         super().__init__(seed=seed)
 
         # モデル全体の基本設定
@@ -184,6 +184,7 @@ class DataMarket(Model):
         self.persona_dist = persona_dist  # {"intrinsic":0.5, "follower":0.5} のような比率
         self.tau = tau                    # ロジスティック関数の鋭さ
         self.dynamic_pricing = dynamic_pricing
+        self.pricing_strategy = pricing_strategy
         self.gamma = gamma
         self.current_price = initial_price # 現在の価格（動的に変動）
 
@@ -252,10 +253,18 @@ class DataMarket(Model):
     def update_price(self):
         """
         動的価格設定が有効な場合、販売数に応じて価格を更新する。
-        P(k) = P_base * (1 + gamma * k / N)
+        Linear: P(k) = P_base * (1 + gamma * k / N)
+        Exponential: P(k) = P_base * exp(gamma * k)
         """
         if self.dynamic_pricing:
-            self.current_price = self.initial_price * (1 + self.gamma * (self.sold_tokens / self.num_agents))
+            if self.pricing_strategy == "exponential":
+                # 指数関数的価格設定（プライバシーリスク調整型）
+                # gammaは分布の感度パラメータに相当 (Risk Premium)
+                # ユーザーフィードバックにより、Nに依存しないよう所持率(k/N)ベースに変更
+                self.current_price = self.initial_price * np.exp(self.gamma * (self.sold_tokens / self.num_agents))
+            else:
+                # 従来の線形価格設定
+                self.current_price = self.initial_price * (1 + self.gamma * (self.sold_tokens / self.num_agents))
 
     # -------------------------------------------------------
     # 1ステップ分のシミュレーション（逐次意思決定モデル）
